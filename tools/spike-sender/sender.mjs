@@ -113,7 +113,9 @@ function ffmpegArgs() {
     '-hide_banner', '-loglevel', 'warning',
     '-fflags', 'nobuffer', '-flags', 'low_delay',
     ...inputArgs(),
-    '-vf', `scale=${SIZE.replace('x', ':')},format=yuv420p`,
+    // fps= makes the output constant-rate: desktop capture only emits frames when
+    // the screen changes, and gaps in timestamps stall MSE until the next keyframe.
+    '-vf', `fps=${FPS},scale=${SIZE.replace('x', ':')},format=yuv420p`,
     '-an',
     ...encoderArgs(),
     ...(CODEC === 'hevc' ? ['-tag:v', 'hvc1'] : []),

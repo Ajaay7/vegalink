@@ -3,6 +3,7 @@ import {
   SourceBuffer,
   VideoPlayer,
 } from '@amazon-devices/react-native-w3cmedia';
+import {Fmp4Timeline} from './Fmp4Timeline';
 
 const log = (msg: string) => console.log(`[VideoSink] ${msg}`);
 
@@ -93,6 +94,7 @@ export class VideoSink {
   private surfaceHandle?: string;
   private stats: VideoSinkStats = VideoSink.emptyStats();
   private appendCount = 0;
+  private readonly timeline = new Fmp4Timeline();
   private readonly maxLead: number;
   private readonly targetLead: number;
 
@@ -173,6 +175,9 @@ export class VideoSink {
 
   pushFragment(data: Uint8Array): void {
     if (!this.initSegment) return;
+    // Make frames back-to-back so irregular capture timing never looks like a
+    // discontinuity (which makes MSE drop frames until the next keyframe).
+    if (!this.timeline.retime(data) && this.appendCount < 5) log('could not retime fragment');
     this.enqueue(data);
   }
 
@@ -262,6 +267,7 @@ export class VideoSink {
     this.pending = [];
     this.initSegment = undefined;
     this.appendCount = 0;
+    this.timeline.reset();
     this.sourceBuffer = undefined;
     this.mediaSource = undefined;
     this.playing = false;
