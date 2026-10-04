@@ -3,4 +3,5 @@
     "compilerOptions": {
         "types": ["jest", "@amazon-devices/react-native-kepler"], // Override "jest", "react-native" from @react-native/typescript-config
     },
+    "exclude": ["node_modules", "packages/*/build", "packages/*/node_modules", "build"]
 }

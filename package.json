@@ -23,6 +23,7 @@
     "@amazon-devices/keplerscript-audio-lib": "~2.0.18",
     "@amazon-devices/react-native-kepler": "~4.0.0",
     "@amazon-devices/react-native-w3cmedia": "~2.3.2",
+    "@vegalink/core": "file:packages/vegalinkcore",
     "react": "19.2.0",
     "react-native": "0.83.0"
   },

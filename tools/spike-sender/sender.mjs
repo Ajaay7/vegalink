@@ -16,12 +16,16 @@
 
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import {WebSocketServer} from 'ws';
 import {Mp4BoxSplitter} from './mp4.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 const PORT = Number(args.port ?? 8765);
+const TCP_PORT = Number(args['tcp-port'] ?? PORT + 1);
+// H.264 Constrained Baseline + CAVLC: ~1.5x faster to software-decode on the stick.
+const BASELINE = args.baseline === 'true';
 const SOURCE = args.source ?? (process.platform === 'win32' ? 'desktop' : 'test');
 const ENCODER = args.encoder ?? 'libx264';
 const CODEC = args.codec ?? 'h264';
@@ -92,7 +96,7 @@ function inputArgs() {
 
 function encoderArgs() {
   const gop = String(FPS * 4);
-  const common = ['-g', gop, '-bf', '0', '-b:v', BITRATE, '-maxrate', BITRATE, '-bufsize', BITRATE];
+  const common = ['-g', gop, '-bf', '0', '-b:v', BITRATE, '-maxrate', BITRATE, '-bufsize', BITRATE, ...baselineArgs()];
   switch (ENCODER) {
     case 'nvenc':
       return ['-c:v', CODEC === 'hevc' ? 'hevc_nvenc' : 'h264_nvenc', '-preset', 'p1', '-tune', 'ull', '-zerolatency', '1', '-rc', 'cbr', ...common];
@@ -105,6 +109,16 @@ function encoderArgs() {
     case 'libx264':
     default:
       return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'high', '-x264-params', 'sliced-threads=1:rc-lookahead=0', ...common];
+  }
+}
+
+function baselineArgs() {
+  if (!BASELINE || CODEC !== 'h264') return [];
+  switch (ENCODER) {
+    case 'amf': return ['-profile:v', 'constrained_baseline', '-coder', 'cavlc'];
+    case 'nvenc': return ['-profile:v', 'baseline'];
+    case 'qsv': return ['-profile:v', 'constrained_baseline'];
+    default: return ['-profile:v', 'baseline'];
   }
 }
 
@@ -127,12 +141,12 @@ function ffmpegArgs() {
 }
 
 const wss = new WebSocketServer({port: PORT, perMessageDeflate: false});
-let current = null; // {ws, proc}
+let current = null; // {t: transport, proc}
 
 function stopCurrent() {
   if (!current) return;
   current.proc.kill('SIGKILL');
-  try { current.ws.close(); } catch {}
+  try { current.t.close(); } catch {}
   current = null;
 }
 
@@ -146,25 +160,26 @@ function frame(kind, payload) {
   return msg;
 }
 
-wss.on('connection', (ws, req) => {
-  console.log(`[spike] viewer connected from ${req.socket.remoteAddress}`);
+// A viewer transport: WebSocket (JS/MSE client) or raw TCP (native client).
+// Both carry the same 'VL' records; TCP also gets the hello as a kind-2 record.
+function startSession(t) {
+  console.log(`[spike] ${t.label} viewer connected from ${t.remote}`);
   stopCurrent();
-  req.socket.setNoDelay(true);
 
   const ffArgs = ffmpegArgs();
   console.log(`[spike] ${FFMPEG} ${ffArgs.join(' ')}`);
   const proc = spawn(FFMPEG, ffArgs, {stdio: ['ignore', 'pipe', 'inherit']});
-  const session = {ws, proc};
+  const session = {t, proc};
   current = session;
 
-  ws.send(JSON.stringify({t: 'hello', codec: CODEC, size: SIZE, fps: FPS, encoder: ENCODER, source: SOURCE}));
+  t.sendHello({t: 'hello', codec: CODEC, size: SIZE, fps: FPS, encoder: ENCODER, source: SOURCE, baseline: BASELINE});
 
   let initSent = false;
   let pendingMoof = null;
   let frames = 0;
   let bytes = 0;
   const statTimer = setInterval(() => {
-    console.log(`[spike] ${frames} fps, ${(bytes * 8 / 1e6).toFixed(1)} Mbps, ws buffered ${ws.bufferedAmount} B`);
+    console.log(`[spike] ${frames} fps, ${(bytes * 8 / 1e6).toFixed(1)} Mbps, ${t.label} buffered ${t.buffered()} B`);
     frames = 0;
     bytes = 0;
   }, 1000);
@@ -175,7 +190,7 @@ wss.on('connection', (ws, req) => {
       if (type === 'ftyp' || type === 'moov') {
         initParts.push(box);
         if (type === 'moov') {
-          ws.send(frame(0, Buffer.concat(initParts)));
+          t.send(frame(0, Buffer.concat(initParts)));
           initSent = true;
         }
       }
@@ -186,10 +201,10 @@ wss.on('connection', (ws, req) => {
     } else if (type === 'mdat' && pendingMoof) {
       // Drop frames rather than queue if the link is congested; the decoder
       // recovers on the next keyframe in the worst case.
-      if (ws.bufferedAmount > 2_000_000) return;
+      if (t.buffered() > 2_000_000) return;
       const payload = Buffer.concat([pendingMoof, box]);
       pendingMoof = null;
-      ws.send(frame(1, payload));
+      t.send(frame(1, payload));
       frames++;
       bytes += payload.length;
     }
@@ -200,7 +215,7 @@ wss.on('connection', (ws, req) => {
       ? `ffmpeg not found. Install it (e.g. "winget install Gyan.FFmpeg", then open a new terminal) or pass --ffmpeg=C:\\path\\to\\ffmpeg.exe`
       : err.message;
     console.error(`[spike] failed to start ffmpeg: ${hint}`);
-    try { ws.close(1011, 'ffmpeg failed to start'); } catch {}
+    t.close();
     if (current === session) current = null;
   });
 
@@ -210,6 +225,25 @@ wss.on('connection', (ws, req) => {
     if (current === session) stopCurrent();
   });
 
+  return {
+    closed() {
+      clearInterval(statTimer);
+      console.log(`[spike] ${t.label} viewer disconnected`);
+      if (current === session) stopCurrent();
+    },
+  };
+}
+
+wss.on('connection', (ws, req) => {
+  req.socket.setNoDelay(true);
+  const s = startSession({
+    label: 'ws',
+    remote: req.socket.remoteAddress,
+    send: (buf) => ws.send(buf),
+    sendHello: (obj) => ws.send(JSON.stringify(obj)),
+    buffered: () => ws.bufferedAmount,
+    close: () => { try { ws.close(1011, 'ffmpeg failed to start'); } catch {} },
+  });
   ws.on('message', (data, isBinary) => {
     if (isBinary) return;
     try {
@@ -217,13 +251,24 @@ wss.on('connection', (ws, req) => {
       if (msg.t === 'ping') ws.send(JSON.stringify({t: 'pong', c: msg.c, s: Date.now()}));
     } catch {}
   });
-
-  ws.on('close', () => {
-    clearInterval(statTimer);
-    console.log('[spike] viewer disconnected');
-    if (current === session) stopCurrent();
-  });
+  ws.on('close', () => s.closed());
 });
 
-console.log(`[spike] listening on ws://0.0.0.0:${PORT}  source=${SOURCE} encoder=${ENCODER} codec=${CODEC} ${SIZE}@${FPS} ${BITRATE}`);
+// Raw TCP for the native client: same records, hello as kind 2 (JSON payload).
+const tcpServer = net.createServer((sock) => {
+  sock.setNoDelay(true);
+  const s = startSession({
+    label: 'tcp',
+    remote: sock.remoteAddress,
+    send: (buf) => sock.write(buf),
+    sendHello: (obj) => sock.write(frame(2, Buffer.from(JSON.stringify(obj)))),
+    buffered: () => sock.writableLength,
+    close: () => sock.destroy(),
+  });
+  sock.on('error', () => {});
+  sock.on('close', () => s.closed());
+});
+tcpServer.listen(TCP_PORT);
+
+console.log(`[spike] listening on ws://0.0.0.0:${PORT} and tcp://0.0.0.0:${TCP_PORT}  source=${SOURCE} encoder=${ENCODER} codec=${CODEC} ${SIZE}@${FPS} ${BITRATE}`);
 console.log(`[spike] using ffmpeg: ${FFMPEG}${FFMPEG === 'ffmpeg' ? '  (not found on PATH or in common install folders!)' : ''}`);

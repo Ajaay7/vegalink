@@ -6,6 +6,7 @@ import {VideoSink, VideoSinkStats, codecFromInit} from '../stream/VideoSink';
 import {SpikeClient, SpikeHello, mimeForCodec} from './SpikeClient';
 import {FocusButton} from '../components/FocusButton';
 import {AddressKeypad} from '../components/AddressKeypad';
+import {VegaLinkCore, readStats, NativeStats} from '@vegalink/core';
 
 const DEFAULT_ADDRESS = '192.168.0.111:8765';
 
@@ -62,6 +63,35 @@ export const SpikeScreen = () => {
   useEffect(() => {
     console.log(`[Spike] window ${width}x${height}, u=${u.toFixed(2)}`);
   }, [width, height, u]);
+
+  // Native pipeline test: TCP receive + ffmpeg decode in C++ (frames not shown yet).
+  const [nativeRunning, setNativeRunning] = useState(false);
+  const [nativeStats, setNativeStats] = useState<NativeStats>();
+  useEffect(() => {
+    if (!nativeRunning) return;
+    const timer = setInterval(() => {
+      try {
+        setNativeStats(readStats());
+      } catch (e) {
+        setState(`native stats failed: ${e}`);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [nativeRunning]);
+
+  const toggleNative = () => {
+    if (nativeRunning) {
+      VegaLinkCore.stop();
+      setNativeRunning(false);
+      return;
+    }
+    const [host, port] = address.split(':');
+    const tcpPort = Number(port || 8765) + 1;
+    console.log(`[Spike] native start ${host}:${tcpPort} (${VegaLinkCore.getVersion()})`);
+    VegaLinkCore.start(host, tcpPort, '', 2);
+    setNativeStats(undefined);
+    setNativeRunning(true);
+  };
 
   const stop = useCallback(() => {
     clientRef.current?.close();
@@ -162,10 +192,28 @@ export const SpikeScreen = () => {
                 </View>
                 <View style={st.buttonRow}>
                   <FocusButton u={u} label="Connect" primary hasTVPreferredFocus onPress={start} style={st.grow} />
+                  <FocusButton u={u} label={nativeRunning ? 'Stop native' : 'Native decode test'} onPress={toggleNative} style={st.grow} />
                   <FocusButton u={u} label="Edit address" onPress={() => setEditing(true)} style={st.grow} />
                 </View>
                 <Text style={st.label}>Status</Text>
                 <Text style={st.value}>{state}</Text>
+                {nativeRunning && (
+                  <>
+                    <Text style={st.label}>Native pipeline (TCP {address.split(':')[0]}:{Number(address.split(':')[1] || 8765) + 1}, 2 decode threads)</Text>
+                    <Text style={st.value}>
+                      {nativeStats
+                        ? `${nativeStats.state}${nativeStats.error ? ` (${nativeStats.error})` : ''} | ${nativeStats.width}x${nativeStats.height}`
+                        : 'starting…'}
+                    </Text>
+                    {nativeStats && (
+                      <Text style={st.value}>
+                        recv {nativeStats.received} fps | decoded {nativeStats.decoded} fps | decode {nativeStats.decodeMsAvg.toFixed(1)} ms avg /{' '}
+                        {nativeStats.decodeMsMax.toFixed(1)} max | recv→done {nativeStats.pipelineMsAvg.toFixed(1)} ms |{' '}
+                        {((nativeStats.bytes * 8) / 1e6).toFixed(1)} Mbps | {nativeStats.renderer}
+                      </Text>
+                    )}
+                  </>
+                )}
               </>
             )}
           </View>
