@@ -4,6 +4,53 @@ import {
   VideoPlayer,
 } from '@amazon-devices/react-native-w3cmedia';
 
+const log = (msg: string) => console.log(`[VideoSink] ${msg}`);
+
+function hexHead(b: Uint8Array, n = 24): string {
+  return Array.from(b.subarray(0, n), (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+function describeRanges(r: {length: number; start(i: number): number; end(i: number): number}): string {
+  const parts: string[] = [];
+  for (let i = 0; i < r.length; i++) parts.push(`${r.start(i).toFixed(3)}-${r.end(i).toFixed(3)}`);
+  return `[${parts.join(',')}]`;
+}
+
+/**
+ * Derives the exact RFC 6381 codec string from an fMP4 init segment by reading
+ * the avcC / hvcC record, so the SourceBuffer MIME matches the encoder output.
+ */
+export function codecFromInit(init: Uint8Array): string | undefined {
+  const find = (tag: string): number => {
+    const t = [...tag].map((c) => c.charCodeAt(0));
+    for (let i = 4; i + 4 <= init.length; i++) {
+      if (init[i] === t[0] && init[i + 1] === t[1] && init[i + 2] === t[2] && init[i + 3] === t[3]) return i + 4;
+    }
+    return -1;
+  };
+  const hex = (x: number) => x.toString(16).padStart(2, '0');
+  const avc = find('avcC');
+  if (avc > 0 && avc + 4 <= init.length) {
+    // configurationVersion, AVCProfileIndication, profile_compatibility, AVCLevelIndication
+    return `avc1.${hex(init[avc + 1])}${hex(init[avc + 2])}${hex(init[avc + 3])}`;
+  }
+  const hvc = find('hvcC');
+  if (hvc > 0 && hvc + 13 <= init.length) {
+    const b = init[hvc + 1];
+    const profileSpace = ['', 'A', 'B', 'C'][b >> 6];
+    const tier = (b >> 5) & 1 ? 'H' : 'L';
+    const profileIdc = b & 0x1f;
+    let compat = 0;
+    for (let i = 0; i < 4; i++) compat = (compat << 8) | init[hvc + 2 + i];
+    // compatibility flags are written bit-reversed
+    let rev = 0;
+    for (let i = 0; i < 32; i++) rev = (rev << 1) | ((compat >>> i) & 1);
+    const level = init[hvc + 12];
+    return `hvc1.${profileSpace}${profileIdc}.${(rev >>> 0).toString(16)}.${tier}${level}.B0`;
+  }
+  return undefined;
+}
+
 export type VideoSinkStats = {
   /** Seconds of media buffered ahead of the playhead. */
   leadMs: number;
@@ -45,6 +92,7 @@ export class VideoSink {
   private playing = false;
   private surfaceHandle?: string;
   private stats: VideoSinkStats = VideoSink.emptyStats();
+  private appendCount = 0;
   private readonly maxLead: number;
   private readonly targetLead: number;
 
@@ -67,6 +115,15 @@ export class VideoSink {
 
   async initialize(): Promise<void> {
     await this.player.initialize();
+    this.player.addEventListener('error', () => {
+      const err = this.player.error;
+      const msg = `player error code=${err?.code} message=${err?.message ?? ''}`;
+      this.stats.error = msg;
+      log(msg);
+    });
+    for (const ev of ['loadedmetadata', 'canplay', 'playing', 'waiting', 'stalled']) {
+      this.player.addEventListener(ev, () => log(`player event: ${ev}`));
+    }
   }
 
   setSurface(handle: string): void {
@@ -88,15 +145,15 @@ export class VideoSink {
     return new Promise((resolve, reject) => {
       ms.addEventListener('sourceopen', () => {
         try {
-          try {
-            ms.duration = Infinity;
-          } catch {
-            // Not all players accept an infinite duration; harmless.
-          }
+          log(`sourceopen; addSourceBuffer(${mime})`);
           const sb = ms.addSourceBuffer(mime);
-          sb.addEventListener('updateend', () => this.drain());
+          sb.addEventListener('updateend', () => {
+            if (this.appendCount <= 3) log(`updateend #${this.appendCount} buffered=${describeRanges(sb.buffered)}`);
+            this.drain();
+          });
           sb.addEventListener('error', () => {
             this.stats.error = 'SourceBuffer error';
+            log('SourceBuffer error event');
           });
           this.sourceBuffer = sb;
           this.timer = setInterval(() => this.tick(), 100);
@@ -143,6 +200,8 @@ export class VideoSink {
     }
     this.stats.appended += this.pending.length;
     this.pending = [];
+    this.appendCount++;
+    if (this.appendCount <= 3) log(`appendBuffer #${this.appendCount}: ${chunk.byteLength} bytes, head=${hexHead(chunk)}`);
     try {
       sb.appendBuffer(chunk);
     } catch (e) {
@@ -202,6 +261,7 @@ export class VideoSink {
     this.timer = undefined;
     this.pending = [];
     this.initSegment = undefined;
+    this.appendCount = 0;
     this.sourceBuffer = undefined;
     this.mediaSource = undefined;
     this.playing = false;

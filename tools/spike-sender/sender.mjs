@@ -4,8 +4,9 @@
 // ffmpeg as fragmented MP4 with one fragment per frame, and pushes each
 // fragment to the Fire TV app over a WebSocket.
 //
-// Wire format (binary messages):
-//   [u8 kind][f64 BE sender wall-clock ms][payload]
+// Wire format: binary WebSocket data is treated as a byte stream of records
+// (the Vega WebSocket may split one message into several), each record:
+//   ['V' 'L'][u32 BE n = bytes after this field][u8 kind][f64 BE sender ms][payload]
 //   kind 0 = init segment (ftyp+moov), kind 1 = media fragment (moof+mdat)
 // Text messages carry JSON for clock sync: {"t":"ping","c":<clientMs>} ->
 // {"t":"pong","c":<clientMs>,"s":<serverMs>} and a {"t":"hello",...} banner.
@@ -134,10 +135,12 @@ function stopCurrent() {
 }
 
 function frame(kind, payload) {
-  const msg = Buffer.allocUnsafe(9 + payload.length);
-  msg.writeUInt8(kind, 0);
-  msg.writeDoubleBE(Date.now(), 1);
-  payload.copy(msg, 9);
+  const msg = Buffer.allocUnsafe(15 + payload.length);
+  msg.write('VL', 0, 'latin1');
+  msg.writeUInt32BE(9 + payload.length, 2);
+  msg.writeUInt8(kind, 6);
+  msg.writeDoubleBE(Date.now(), 7);
+  payload.copy(msg, 15);
   return msg;
 }
 

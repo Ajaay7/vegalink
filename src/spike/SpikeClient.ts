@@ -1,5 +1,9 @@
 // WebSocket client for the Phase 0 latency spike sender (tools/spike-sender).
-// Wire format: [u8 kind][f64 BE sender ms][payload]; kind 0 = init, 1 = fragment.
+// Binary data is a byte stream of length-prefixed records (see RecordStream):
+// the Vega WebSocket can split one sent message into several onmessage calls,
+// so message boundaries are not relied on. kind 0 = init, 1 = fragment.
+
+import {RecordStream} from './RecordStream';
 
 export type SpikeHello = {codec: string; size: string; fps: number; encoder: string; source: string};
 
@@ -17,6 +21,9 @@ export class SpikeClient {
   /** Estimated serverClock - localClock, from the lowest-RTT ping seen. */
   private clockOffset?: number;
   private bestRtt = Infinity;
+  private badMessages = 0;
+  private readonly records = new RecordStream();
+  private chunks = 0;
 
   constructor(private readonly ev: SpikeClientEvents) {}
 
@@ -31,6 +38,7 @@ export class SpikeClient {
       this.ev.onState('open');
       this.bestRtt = Infinity;
       this.clockOffset = undefined;
+      this.records.reset();
       this.pingTimer = setInterval(() => ws.send(JSON.stringify({t: 'ping', c: Date.now()})), 1000);
     };
     ws.onclose = (e) => {
@@ -45,16 +53,23 @@ export class SpikeClient {
         this.handleText(e.data);
         return;
       }
-      const buf = e.data as ArrayBuffer;
-      const view = new DataView(buf);
-      const kind = view.getUint8(0);
-      const sentAt = view.getFloat64(1, false);
-      const payload = new Uint8Array(buf, 9);
-      if (kind === 0) {
-        this.ev.onInit(payload);
-      } else {
-        const transit = this.clockOffset === undefined ? undefined : Date.now() + this.clockOffset - sentAt;
-        this.ev.onFragment(payload, transit);
+      const chunk = new Uint8Array(e.data as ArrayBuffer);
+      if (this.chunks++ < 5) console.log(`[SpikeClient] chunk ${chunk.byteLength} bytes`);
+      const before = this.records.resyncBytes;
+      for (const r of this.records.push(chunk)) {
+        const box = String.fromCharCode(r.payload[4], r.payload[5], r.payload[6], r.payload[7]);
+        if (box !== (r.kind === 0 ? 'ftyp' : 'moof') && this.badMessages++ < 5) {
+          console.log(`[SpikeClient] unexpected box '${box}' for kind ${r.kind}, ${r.payload.byteLength} bytes`);
+        }
+        if (r.kind === 0) {
+          this.ev.onInit(r.payload);
+        } else {
+          const transit = this.clockOffset === undefined ? undefined : Date.now() + this.clockOffset - r.sentAt;
+          this.ev.onFragment(r.payload, transit);
+        }
+      }
+      if (this.records.resyncBytes !== before) {
+        console.log(`[SpikeClient] skipped ${this.records.resyncBytes - before} bytes looking for a record marker`);
       }
     };
   }

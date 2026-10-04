@@ -1,11 +1,13 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
-import {BackHandler, StyleSheet, Text, TextInput, TouchableOpacity, View} from 'react-native';
+import {BackHandler, StyleSheet, Text, View, useWindowDimensions} from 'react-native';
 import {KeplerVideoSurfaceView} from '@amazon-devices/react-native-w3cmedia';
 import {useGamepadEventHandler, GamepadEvent} from '@amazon-devices/react-native-kepler';
-import {VideoSink, VideoSinkStats} from '../stream/VideoSink';
+import {VideoSink, VideoSinkStats, codecFromInit} from '../stream/VideoSink';
 import {SpikeClient, SpikeHello, mimeForCodec} from './SpikeClient';
+import {FocusButton} from '../components/FocusButton';
+import {AddressKeypad} from '../components/AddressKeypad';
 
-const DEFAULT_URL = 'ws://192.168.0.111:8765';
+const DEFAULT_ADDRESS = '192.168.0.111:8765';
 
 const CODEC_PROBES: Array<[string, string]> = [
   ['H.264 High', 'video/mp4; codecs="avc1.640028"'],
@@ -22,7 +24,15 @@ type Transit = {last: number; avg: number};
  * by filming the PC monitor (running a millisecond stopwatch) next to the TV.
  */
 export const SpikeScreen = () => {
-  const [url, setUrl] = useState(DEFAULT_URL);
+  // The system on-screen keyboard isn't available to this app (no IME service),
+  // so the address is edited with our own D-pad keypad instead of a TextInput.
+  const [address, setAddress] = useState(DEFAULT_ADDRESS);
+  const [editing, setEditing] = useState(false);
+  const {width, height} = useWindowDimensions();
+  // 1u = 1/540 of the screen height: the TV's layout viewport is much smaller
+  // than 1080p, so all sizes are expressed in this unit.
+  const u = height / 540;
+  const st = layout(u);
   const [state, setState] = useState<string>('idle');
   const [streaming, setStreaming] = useState(false);
   const [hello, setHello] = useState<SpikeHello>();
@@ -35,6 +45,8 @@ export const SpikeScreen = () => {
   const sinkRef = useRef<VideoSink | undefined>(undefined);
   const clientRef = useRef<SpikeClient | undefined>(undefined);
   const openRef = useRef<Promise<void> | undefined>(undefined);
+  const codecRef = useRef('h264');
+  const [mime, setMime] = useState<string>();
   const fragCount = useRef(0);
   const transitRef = useRef<Transit>({last: 0, avg: 0});
 
@@ -46,6 +58,10 @@ export const SpikeScreen = () => {
       setPad(`${e.eventType} action=${e.eventKeyAction} dev=${e.deviceIdentifier?.vendorId?.toString(16)}:${e.deviceIdentifier?.productId?.toString(16)}`);
     }
   });
+
+  useEffect(() => {
+    console.log(`[Spike] window ${width}x${height}, u=${u.toFixed(2)}`);
+  }, [width, height, u]);
 
   const stop = useCallback(() => {
     clientRef.current?.close();
@@ -90,11 +106,16 @@ export const SpikeScreen = () => {
       onRtt: setRtt,
       onHello: (h) => {
         setHello(h);
-        openRef.current = sink.open(mimeForCodec(h.codec));
-        openRef.current.catch((e) => setState(`MSE open failed: ${e}`));
+        codecRef.current = h.codec;
       },
       onInit: (data) => {
-        openRef.current?.then(() => sink.pushInit(data));
+        // Open the MediaSource with the exact codec string from the encoder's init segment.
+        const codec = codecFromInit(data);
+        const mime = codec ? `video/mp4; codecs="${codec}"` : mimeForCodec(codecRef.current);
+        console.log(`[Spike] init segment ${data.byteLength} bytes, mime ${mime}, supported=${VideoSink.supports(mime)}`);
+        setMime(mime);
+        openRef.current = sink.open(mime).then(() => sink.pushInit(data));
+        openRef.current.catch((e) => setState(`MSE open failed: ${e}`));
       },
       onFragment: (data, t) => {
         fragCount.current++;
@@ -107,7 +128,7 @@ export const SpikeScreen = () => {
       },
     });
     clientRef.current = client;
-    client.connect(url);
+    client.connect(`ws://${address}`);
   };
 
   return (
@@ -119,39 +140,67 @@ export const SpikeScreen = () => {
       />
 
       {!streaming && (
-        <View style={styles.panel}>
-          <Text style={styles.title}>VegaLink — latency spike</Text>
-          <Text style={styles.label}>Sender URL (run tools/spike-sender on the PC)</Text>
-          <TextInput style={styles.input} value={url} onChangeText={setUrl} autoCapitalize="none" />
-          <TouchableOpacity style={styles.button} onPress={start} hasTVPreferredFocus>
-            <Text style={styles.buttonText}>Connect</Text>
-          </TouchableOpacity>
-          <Text style={styles.label}>Decoder support (MediaSource.isTypeSupported)</Text>
-          {CODEC_PROBES.map(([name, mime]) => (
-            <Text key={name} style={styles.small}>
-              {name}: {VideoSink.supports(mime) ? 'yes' : 'no'}
+        <View style={st.page}>
+          <View style={st.column}>
+            <Text style={st.title}>VegaLink</Text>
+            <Text style={st.subtitle}>Latency test (Phase 0)</Text>
+            {editing ? (
+              <AddressKeypad
+                u={u}
+                initial={address}
+                onCancel={() => setEditing(false)}
+                onDone={(v) => {
+                  if (v) setAddress(v);
+                  setEditing(false);
+                }}
+              />
+            ) : (
+              <>
+                <Text style={st.label}>PC address (run tools/spike-sender on the PC)</Text>
+                <View style={st.addressBox}>
+                  <Text style={st.addressText}>{address}</Text>
+                </View>
+                <View style={st.buttonRow}>
+                  <FocusButton u={u} label="Connect" primary hasTVPreferredFocus onPress={start} style={st.grow} />
+                  <FocusButton u={u} label="Edit address" onPress={() => setEditing(true)} style={st.grow} />
+                </View>
+                <Text style={st.label}>Status</Text>
+                <Text style={st.value}>{state}</Text>
+              </>
+            )}
+          </View>
+
+          <View style={[st.column, st.diagnostics]}>
+            <Text style={st.label}>Hardware decoder support</Text>
+            {CODEC_PROBES.map(([name, m]) => (
+              <Text key={name} style={st.value}>
+                {VideoSink.supports(m) ? '✓' : '✗'} {name}
+              </Text>
+            ))}
+            <Text style={st.label}>Last gamepad event</Text>
+            <Text style={st.value}>{pad}</Text>
+            <Text style={st.label}>Screen</Text>
+            <Text style={st.value}>
+              {Math.round(width)}×{Math.round(height)} layout units
             </Text>
-          ))}
-          <Text style={styles.label}>Last gamepad event</Text>
-          <Text style={styles.small}>{pad}</Text>
-          <Text style={styles.small}>Status: {state}</Text>
+          </View>
         </View>
       )}
 
       {streaming && (
-        <View style={styles.hud} pointerEvents="none">
-          <Text style={styles.hudText}>
-            {state} | {hello ? `${hello.codec} ${hello.size}@${hello.fps} ${hello.encoder}` : '…'}
+        <View style={st.hud} pointerEvents="none">
+          <Text style={st.hudText}>
+            {state} | {hello ? `${hello.codec} ${hello.size}@${hello.fps} ${hello.encoder}` : '…'} | {mime ?? ''}
           </Text>
-          <Text style={styles.hudText}>
+          <Text style={st.hudText}>
             recv {fragsPerSec} fps | rtt {rtt ?? '-'} ms | transit {transit ? `${transit.last.toFixed(0)} (avg ${transit.avg.toFixed(0)})` : '-'} ms
           </Text>
-          <Text style={styles.hudText}>
+          <Text style={st.hudText}>
             buffer lead {stats?.leadMs ?? '-'} ms | queued {stats?.queued ?? 0} | skips {stats?.skips ?? 0} | dropped {stats?.droppedFrames ?? 0}/{stats?.totalFrames ?? 0} | {stats?.videoWidth}x{stats?.videoHeight}
           </Text>
-          {stats?.error && <Text style={[styles.hudText, styles.err]}>{stats.error}</Text>}
-          <Text style={styles.hudText}>pad: {pad}</Text>
-          <Text style={styles.hudText}>Back to disconnect</Text>
+          {stats?.error && <Text style={[st.hudText, st.err]}>{stats.error}</Text>}
+          <Text style={st.hudText}>pad: {pad}</Text>
+          <Text style={st.hudText}>Back to disconnect</Text>
         </View>
       )}
     </View>
@@ -165,14 +214,29 @@ function fmt(v?: number): string {
 const styles = StyleSheet.create({
   root: {flex: 1, backgroundColor: '#000'},
   video: {position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 0},
-  panel: {margin: 64, padding: 32, backgroundColor: 'rgba(20,20,28,0.92)', borderRadius: 16, width: 900, zIndex: 1},
-  title: {color: '#fff', fontSize: 40, fontWeight: '600', marginBottom: 24},
-  label: {color: '#9aa4b2', fontSize: 20, marginTop: 20, marginBottom: 6},
-  input: {color: '#fff', fontSize: 26, borderWidth: 2, borderColor: '#4a5568', borderRadius: 8, paddingHorizontal: 16, paddingVertical: 10},
-  button: {marginTop: 20, backgroundColor: '#3b82f6', borderRadius: 8, paddingVertical: 14, alignItems: 'center'},
-  buttonText: {color: '#fff', fontSize: 26, fontWeight: '600'},
-  small: {color: '#e2e8f0', fontSize: 20},
-  hud: {position: 'absolute', top: 16, left: 16, padding: 12, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 8, zIndex: 2},
-  hudText: {color: '#9ef01a', fontSize: 18, fontFamily: 'monospace'},
-  err: {color: '#ff6b6b'},
 });
+
+const layout = (u: number) =>
+  StyleSheet.create({
+    page: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 1,
+      flexDirection: 'row',
+      paddingHorizontal: 40 * u,
+      paddingVertical: 32 * u,
+      backgroundColor: '#12141c',
+    },
+    column: {flex: 1, marginRight: 32 * u},
+    diagnostics: {marginRight: 0, padding: 16 * u, borderRadius: 10 * u, backgroundColor: '#1b1f2a'},
+    title: {color: '#fff', fontSize: 34 * u, fontWeight: '700'},
+    subtitle: {color: '#9aa4b2', fontSize: 14 * u, marginBottom: 16 * u},
+    label: {color: '#9aa4b2', fontSize: 12 * u, marginTop: 12 * u, marginBottom: 4 * u},
+    value: {color: '#e2e8f0', fontSize: 14 * u},
+    addressBox: {borderWidth: 1, borderColor: '#4a5568', borderRadius: 6 * u, paddingHorizontal: 10 * u, paddingVertical: 6 * u},
+    addressText: {color: '#fff', fontSize: 18 * u},
+    buttonRow: {flexDirection: 'row', marginTop: 12 * u, gap: 10 * u},
+    grow: {flex: 1},
+    hud: {position: 'absolute', top: 8 * u, left: 8 * u, padding: 6 * u, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 4 * u, zIndex: 2},
+    hudText: {color: '#9ef01a', fontSize: 10 * u, fontFamily: 'monospace'},
+    err: {color: '#ff6b6b'},
+  });
