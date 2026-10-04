@@ -1,0 +1,13 @@
+{
+  "name": "vegalink-spike-sender",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 latency spike: streams low-latency fMP4 (one fragment per frame) over WebSocket to the VegaLink app.",
+  "scripts": {
+    "start": "node sender.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
