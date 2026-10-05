@@ -65,7 +65,7 @@ bool H264Decoder::open(const std::vector<uint8_t>& avcC, int threads, std::strin
   return true;
 }
 
-bool H264Decoder::decode(const uint8_t* data, size_t size, const FrameCallback& onFrame, std::string& error) {
+bool H264Decoder::decode(const uint8_t* data, size_t size, int64_t pts, const FrameCallback& onFrame, std::string& error) {
   if (!impl_->ctx) {
     error = "decoder not open";
     return false;
@@ -77,6 +77,8 @@ bool H264Decoder::decode(const uint8_t* data, size_t size, const FrameCallback& 
     return false;
   }
   std::memcpy(pkt->data, data, size);
+  pkt->pts = pts;
+  pkt->dts = pts;
   int err = avcodec_send_packet(impl_->ctx, pkt);
   av_packet_unref(pkt);
   if (err < 0 && err != AVERROR(EAGAIN)) {
@@ -99,7 +101,7 @@ bool H264Decoder::decode(const uint8_t* data, size_t size, const FrameCallback& 
         yuv.plane[i] = f->data[i];
         yuv.stride[i] = f->linesize[i];
       }
-      onFrame(yuv);
+      onFrame(yuv, f->pts != AV_NOPTS_VALUE ? f->pts : f->best_effort_timestamp);
     } else {
       error = "unsupported pixel format " + std::to_string(f->format);
     }
@@ -125,7 +127,7 @@ bool H264Decoder::open(const std::vector<uint8_t>&, int, std::string& error) {
   error = "built without ffmpeg for this architecture";
   return false;
 }
-bool H264Decoder::decode(const uint8_t*, size_t, const FrameCallback&, std::string& error) {
+bool H264Decoder::decode(const uint8_t*, size_t, int64_t, const FrameCallback&, std::string& error) {
   error = "built without ffmpeg";
   return false;
 }

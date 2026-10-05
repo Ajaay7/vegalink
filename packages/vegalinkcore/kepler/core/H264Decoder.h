@@ -18,7 +18,8 @@ namespace vegalink {
  */
 class H264Decoder {
  public:
-  using FrameCallback = std::function<void(const YuvFrame&)>;
+  /** pts is the value passed to decode() for the access unit this frame came from. */
+  using FrameCallback = std::function<void(const YuvFrame&, int64_t pts)>;
 
   H264Decoder();
   ~H264Decoder();
@@ -28,7 +29,7 @@ class H264Decoder {
   /** threads: 1 = lowest latency; 2+ = frame threading (adds threads-1 frames of delay). */
   bool open(const std::vector<uint8_t>& avcC, int threads, std::string& error);
   /** Decodes one access unit; invokes onFrame for every frame that becomes ready. */
-  bool decode(const uint8_t* data, size_t size, const FrameCallback& onFrame, std::string& error);
+  bool decode(const uint8_t* data, size_t size, int64_t pts, const FrameCallback& onFrame, std::string& error);
   void close();
 
  private:

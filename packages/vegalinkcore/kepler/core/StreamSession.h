@@ -44,6 +44,7 @@ class StreamSession {
   int received_ = 0;
   int decoded_ = 0;
   int presented_ = 0;
+  int dropped_ = 0;
   double decodeMsSum_ = 0;
   double decodeMsMax_ = 0;
   double pipelineMsSum_ = 0;

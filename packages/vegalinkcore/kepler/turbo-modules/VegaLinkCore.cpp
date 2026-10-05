@@ -3,6 +3,7 @@
 #include "../core/H264Decoder.h"
 #include "../core/Presenter.h"
 #include "../core/StreamSession.h"
+#include "../ui/MediaSurfacePresenter.h"
 
 using namespace com::amazon::kepler::turbomodule;
 
@@ -22,9 +23,14 @@ std::string VegaLinkCore::getVersion() {
 bool VegaLinkCore::start(std::string host, double port, std::string surfaceHandle, double decodeThreads) {
   std::lock_guard<std::mutex> lock(mutex_);
   session_.reset();
-  // TODO(render spike): replace NullPresenter with a surface presenter bound to surfaceHandle.
-  (void)surfaceHandle;
-  auto presenter = std::make_unique<vegalink::NullPresenter>();
+  // surfaceHandle "" = decode only (benchmark); anything else = present into the
+  // media surface of the mounted <VegaLinkVideoView>.
+  std::unique_ptr<vegalink::Presenter> presenter;
+  if (surfaceHandle.empty()) {
+    presenter = std::make_unique<vegalink::NullPresenter>();
+  } else {
+    presenter = std::make_unique<vegalink::MediaSurfacePresenter>();
+  }
   session_ = std::make_unique<vegalink::StreamSession>(host, static_cast<int>(port), static_cast<int>(decodeThreads),
                                                        std::move(presenter));
   session_->start();

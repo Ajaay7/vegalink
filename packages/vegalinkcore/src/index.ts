@@ -9,10 +9,12 @@ export type NativeStats = {
   received: number;
   decoded: number;
   presented: number;
-  /** Average decode time per frame (ms) and worst case in the interval. */
+  /** Decoded frames not shown (no free surface buffer, or rejected by the surface). */
+  dropped: number;
+  /** Time from access unit received to frame decoded (ms): average and worst in the interval. */
   decodeMsAvg: number;
   decodeMsMax: number;
-  /** Average time from frame received to presented (ms). */
+  /** Average time from access unit received to frame handed to the display (ms). */
   pipelineMsAvg: number;
   bytes: number;
   intervalMs: number;
@@ -24,3 +26,6 @@ export type NativeStats = {
 export function readStats(): NativeStats {
   return JSON.parse(VegaLinkCore.getStats()) as NativeStats;
 }
+
+export {VegaLinkVideoView} from './components/VegaLinkVideoView';
+export type {VegaLinkVideoViewProps} from './components/VegaLinkVideoView';

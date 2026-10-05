@@ -124,6 +124,9 @@ void StreamSession::run() {
   RecordReader::Record rec;
   std::vector<uint8_t> buf(256 * 1024);
   bool decoderOpen = false;
+  constexpr int64_t kArrivalSlots = 64;
+  Clock::time_point arrivals[kArrivalSlots];
+  int64_t nextSeq = 0;
 
   while (!stopping_) {
     ssize_t n = ::recv(fd_, buf.data(), buf.size(), 0);
@@ -157,19 +160,27 @@ void StreamSession::run() {
           std::lock_guard<std::mutex> lock(statsMutex_);
           ++received_;
         }
-        Clock::time_point decodeStart = Clock::now();
-        bool first = true;
-        decoder.decode(au.data, au.size, [&](const YuvFrame& frame) {
-          double decodeMs = first ? msSince(decodeStart) : 0;
-          first = false;
+        // Remember when each access unit arrived so the frame that comes out
+        // of the (possibly frame-threaded) decoder can be timed end to end.
+        const int64_t seq = nextSeq++;
+        arrivals[seq % kArrivalSlots] = receivedAt;
+        decoder.decode(au.data, au.size, seq, [&](const YuvFrame& frame, int64_t pts) {
+          Clock::time_point decodedAt = Clock::now();
+          bool known = pts >= 0 && pts > seq - kArrivalSlots && pts <= seq;
+          Clock::time_point arrivedAt = known ? arrivals[pts % kArrivalSlots] : receivedAt;
+          // Arrival -> decoded: includes any frame-threading delay.
+          double decodeMs = std::chrono::duration<double, std::milli>(decodedAt - arrivedAt).count();
           bool shown = presenter_->present(frame);
+          double totalMs = msSince(arrivedAt);
           std::lock_guard<std::mutex> lock(statsMutex_);
           ++decoded_;
           decodeMsSum_ += decodeMs;
           if (decodeMs > decodeMsMax_) decodeMsMax_ = decodeMs;
           if (shown) {
             ++presented_;
-            pipelineMsSum_ += msSince(receivedAt);
+            pipelineMsSum_ += totalMs;
+          } else {
+            ++dropped_;
           }
           width_ = frame.width;
           height_ = frame.height;
@@ -189,16 +200,16 @@ std::string StreamSession::takeStatsJson() {
   std::lock_guard<std::mutex> lock(statsMutex_);
   double intervalMs = msSince(lastStats_);
   lastStats_ = Clock::now();
-  char out[768];
+  char out[1024];
   std::snprintf(out, sizeof(out),
-                "{\"state\":\"%s\",\"error\":\"%s\",\"received\":%d,\"decoded\":%d,\"presented\":%d,"
+                "{\"state\":\"%s\",\"error\":\"%s\",\"received\":%d,\"decoded\":%d,\"presented\":%d,\"dropped\":%d,"
                 "\"decodeMsAvg\":%.2f,\"decodeMsMax\":%.2f,\"pipelineMsAvg\":%.2f,\"bytes\":%lld,"
                 "\"intervalMs\":%.0f,\"width\":%d,\"height\":%d,\"renderer\":\"%s\"}",
-                state_.c_str(), jsonEscape(error_).c_str(), received_, decoded_, presented_,
+                state_.c_str(), jsonEscape(error_).c_str(), received_, decoded_, presented_, dropped_,
                 decoded_ ? decodeMsSum_ / decoded_ : 0.0, decodeMsMax_,
                 presented_ ? pipelineMsSum_ / presented_ : 0.0, bytes_, intervalMs, width_, height_,
-                presenter_ ? presenter_->name().c_str() : "none");
-  received_ = decoded_ = presented_ = 0;
+                presenter_ ? jsonEscape(presenter_->name()).c_str() : "none");
+  received_ = decoded_ = presented_ = dropped_ = 0;
   decodeMsSum_ = decodeMsMax_ = pipelineMsSum_ = 0;
   bytes_ = 0;
   return out;

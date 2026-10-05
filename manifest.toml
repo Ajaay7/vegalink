@@ -32,6 +32,10 @@ id = "/com.amazon.kepler.keplerscript_4@IKeplerScript_0"
 [[needs.module]]
 id = "/com.amazon.kepler.w3cmedia_2@IW3cmedia_3"
 
+# Graphics buffers + media surface for the native (software-decode) video path.
+[[needs.module]]
+id = "/com.amazon.kepler.graphics@IObjectFactory3"
+
 # Services required by @amazon-devices/react-native-w3cmedia for playback
 # (https://developer.amazon.com/docs/vega/0.24/media-player-setup.html).
 # Without mediabuffer/mediatransform the hardware decoder fails to start.

@@ -6,7 +6,7 @@ import {VideoSink, VideoSinkStats, codecFromInit} from '../stream/VideoSink';
 import {SpikeClient, SpikeHello, mimeForCodec} from './SpikeClient';
 import {FocusButton} from '../components/FocusButton';
 import {AddressKeypad} from '../components/AddressKeypad';
-import {VegaLinkCore, readStats, NativeStats} from '@vegalink/core';
+import {VegaLinkCore, VegaLinkVideoView, readStats, NativeStats} from '@vegalink/core';
 
 const DEFAULT_ADDRESS = '192.168.0.111:8765';
 
@@ -64,8 +64,10 @@ export const SpikeScreen = () => {
     console.log(`[Spike] window ${width}x${height}, u=${u.toFixed(2)}`);
   }, [width, height, u]);
 
-  // Native pipeline test: TCP receive + ffmpeg decode in C++ (frames not shown yet).
-  const [nativeRunning, setNativeRunning] = useState(false);
+  // Native pipeline: TCP receive + ffmpeg decode in C++, optionally presented
+  // into <VegaLinkVideoView>'s media surface ('render') or discarded ('decode').
+  const [nativeMode, setNativeMode] = useState<'off' | 'decode' | 'render'>('off');
+  const nativeRunning = nativeMode !== 'off';
   const [nativeStats, setNativeStats] = useState<NativeStats>();
   useEffect(() => {
     if (!nativeRunning) return;
@@ -79,18 +81,19 @@ export const SpikeScreen = () => {
     return () => clearInterval(timer);
   }, [nativeRunning]);
 
-  const toggleNative = () => {
-    if (nativeRunning) {
-      VegaLinkCore.stop();
-      setNativeRunning(false);
-      return;
-    }
+  const stopNative = useCallback(() => {
+    VegaLinkCore.stop();
+    setNativeMode('off');
+  }, []);
+
+  const startNative = (mode: 'decode' | 'render') => {
     const [host, port] = address.split(':');
     const tcpPort = Number(port || 8765) + 1;
-    console.log(`[Spike] native start ${host}:${tcpPort} (${VegaLinkCore.getVersion()})`);
-    VegaLinkCore.start(host, tcpPort, '', 2);
+    console.log(`[Spike] native ${mode} ${host}:${tcpPort} (${VegaLinkCore.getVersion()})`);
+    // 'main' = present into the mounted <VegaLinkVideoView>; '' = decode only.
+    VegaLinkCore.start(host, tcpPort, mode === 'render' ? 'main' : '', 2);
     setNativeStats(undefined);
-    setNativeRunning(true);
+    setNativeMode(mode);
   };
 
   const stop = useCallback(() => {
@@ -118,6 +121,10 @@ export const SpikeScreen = () => {
 
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (nativeMode === 'render') {
+        stopNative();
+        return true;
+      }
       if (streaming) {
         stop();
         return true;
@@ -125,7 +132,7 @@ export const SpikeScreen = () => {
       return false;
     });
     return () => sub.remove();
-  }, [streaming, stop]);
+  }, [streaming, stop, nativeMode, stopNative]);
 
   const start = () => {
     const sink = sinkRef.current;
@@ -161,6 +168,30 @@ export const SpikeScreen = () => {
     client.connect(`ws://${address}`);
   };
 
+  if (nativeMode === 'render') {
+    // The media surface is composited behind the React UI, so nothing opaque
+    // may cover it: transparent root, HUD only.
+    return (
+      <View style={styles.nativeRoot}>
+        <VegaLinkVideoView style={StyleSheet.absoluteFill} />
+        <View style={st.hud} pointerEvents="none">
+          <Text style={st.hudText}>
+            native {nativeStats?.state ?? 'starting'} {nativeStats?.error ? `(${nativeStats.error})` : ''} | {nativeStats?.width}x{nativeStats?.height} |{' '}
+            {nativeStats?.renderer}
+          </Text>
+          {nativeStats && (
+            <Text style={st.hudText}>
+              recv {nativeStats.received} | decoded {nativeStats.decoded} | shown {nativeStats.presented} | dropped {nativeStats.dropped} fps |{' '}
+              decode {nativeStats.decodeMsAvg.toFixed(1)}/{nativeStats.decodeMsMax.toFixed(1)} ms | recv→shown {nativeStats.pipelineMsAvg.toFixed(1)} ms |{' '}
+              {((nativeStats.bytes * 8) / 1e6).toFixed(1)} Mbps
+            </Text>
+          )}
+          <Text style={st.hudText}>Back to stop</Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.root}>
       <KeplerVideoSurfaceView
@@ -192,7 +223,13 @@ export const SpikeScreen = () => {
                 </View>
                 <View style={st.buttonRow}>
                   <FocusButton u={u} label="Connect" primary hasTVPreferredFocus onPress={start} style={st.grow} />
-                  <FocusButton u={u} label={nativeRunning ? 'Stop native' : 'Native decode test'} onPress={toggleNative} style={st.grow} />
+                  <FocusButton u={u} label="Native stream" onPress={() => startNative('render')} style={st.grow} />
+                  <FocusButton
+                    u={u}
+                    label={nativeMode === 'decode' ? 'Stop decode test' : 'Decode test'}
+                    onPress={() => (nativeMode === 'decode' ? stopNative() : startNative('decode'))}
+                    style={st.grow}
+                  />
                   <FocusButton u={u} label="Edit address" onPress={() => setEditing(true)} style={st.grow} />
                 </View>
                 <Text style={st.label}>Status</Text>
@@ -261,6 +298,7 @@ function fmt(v?: number): string {
 
 const styles = StyleSheet.create({
   root: {flex: 1, backgroundColor: '#000'},
+  nativeRoot: {flex: 1, backgroundColor: 'transparent'},
   video: {position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 0},
 });
 

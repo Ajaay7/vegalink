@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.17)
 
 project(VegaLinkCore
         VERSION 1.0
@@ -22,6 +22,7 @@ set(HEADERS
   kepler/core/Presenter.h
   kepler/core/RecordReader.h
   kepler/core/StreamSession.h
+  kepler/ui/MediaSurfacePresenter.h
 )
 set(SOURCES
   kepler/turbo-modules/generated/VegaLinkCoreSpec.cpp
@@ -31,9 +32,23 @@ set(SOURCES
   kepler/core/RecordReader.cpp
   kepler/core/StreamSession.cpp
   kepler/AutoLinkInit.cpp
+  kepler/ui/MediaSurfacePresenter.cpp
 )
 
 find_package(turbomoduleAPI CONFIG REQUIRED)
+
+# OS interfaces (IDL → generated C++ bindings): media surface + buffers for
+# presenting decoded frames, and the UI toolkit for the native video view.
+find_package(Apmf REQUIRED)
+find_package(Kepler REQUIRED)
+kepler_add_idl_import_library(vegalink_idl
+  PACKAGES
+  com.amazon.kepler.graphics
+  com.amazon.kepler.buffer
+  com.amazon.kepler.uitoolkit.graphics
+  com.amazon.kepler.uitoolkit.view
+  com.amazon.kepler.uitoolkit.react
+)
 
 kepler_add_turbo_module_library(VegaLinkCore SHARED ${HEADERS} ${SOURCES})
 
@@ -56,6 +71,23 @@ else()
   message(STATUS "VegaLinkCore: no ffmpeg for ${VEGALINK_ARCH} (${CMAKE_SYSTEM_PROCESSOR}); decoder disabled")
 endif()
 
-target_link_libraries(VegaLinkCore PRIVATE ${LIBRARIES})
+target_link_libraries(VegaLinkCore PRIVATE vegalink_idl ${LIBRARIES})
 
 install(TARGETS VegaLinkCore)
+
+# <VegaLinkVideoView> native UI component: a separate APMF component library
+# ("/com.vegalink.ui"), installed under the component's file name.
+kepler_add_library(VegaLinkUI SHARED
+  kepler/ui/SurfaceRegistry.cpp
+  kepler/ui/VideoViewManager.cpp
+)
+target_link_libraries(VegaLinkUI PRIVATE vegalink_idl turbomoduleAPI::turbomoduleAPI)
+kepler_install_components(VegaLinkUI IN_PROCESS "/com.vegalink.ui")
+set(VEGALINK_UI_COMPONENT_FILE "com.vegalink.ui.so")
+add_custom_command(
+  TARGET VegaLinkUI
+  POST_BUILD
+  COMMAND ${CMAKE_COMMAND} ARGS -E copy $<TARGET_FILE:VegaLinkUI> ${CMAKE_CURRENT_BINARY_DIR}/${VEGALINK_UI_COMPONENT_FILE}
+)
+install(TARGETS VegaLinkUI)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${VEGALINK_UI_COMPONENT_FILE} DESTINATION lib)
